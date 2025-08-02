@@ -835,4 +835,840 @@
     </script>
 </body>
 </html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Attendance Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-4 sm:p-8">
+    <div class="max-w-4xl mx-auto">
+        <header class="text-center mb-10">
+            <h1 class="text-4xl sm:text-5xl font-extrabold text-gray-900 leading-tight">
+                Attendance Tracker
+            </h1>
+            <p class="mt-4 text-lg sm:text-xl text-gray-600">
+                Keep your attendance above 75%!
+            </p>
+            <p id="userIdDisplay" class="mt-2 text-sm text-gray-400"></p>
+        </header>
 
+        <div id="errorContainer" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-xl mb-4" role="alert">
+            <span id="errorMessage" class="block sm:inline"></span>
+        </div>
+
+        <!-- Form to add new subject -->
+        <div class="bg-white p-6 rounded-3xl shadow-xl mb-8">
+            <form id="addSubjectForm" class="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
+                <input
+                    type="text"
+                    id="newSubjectName"
+                    placeholder="Enter new subject name..."
+                    class="flex-1 p-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200"
+                />
+                <button
+                    type="submit"
+                    class="bg-blue-600 text-white font-bold py-3 px-6 rounded-xl hover:bg-blue-700 transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+                >
+                    Add Subject
+                </button>
+            </form>
+        </div>
+
+        <!-- List of subjects -->
+        <div id="subjectsContainer" class="space-y-4">
+            <!-- Subjects will be rendered here by JavaScript -->
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, onSnapshot, doc, addDoc, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables for Firebase setup
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = null;
+
+        const subjectsContainer = document.getElementById('subjectsContainer');
+        const addSubjectForm = document.getElementById('addSubjectForm');
+        const newSubjectNameInput = document.getElementById('newSubjectName');
+        const userIdDisplay = document.getElementById('userIdDisplay');
+        const errorContainer = document.getElementById('errorContainer');
+        const errorMessage = document.getElementById('errorMessage');
+        
+        const showLoading = () => {
+          subjectsContainer.innerHTML = `
+            <div class="flex items-center justify-center p-8 bg-white rounded-xl shadow-xl">
+              <svg class="animate-spin h-10 w-10 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            </div>
+          `;
+        };
+
+        const showError = (message) => {
+          errorMessage.textContent = message;
+          errorContainer.classList.remove('hidden');
+        };
+
+        const hideError = () => {
+          errorContainer.classList.add('hidden');
+        };
+
+        // Initialize Firebase and Auth
+        const initFirebase = async () => {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        userIdDisplay.textContent = `User ID: ${userId}`;
+                        setupFirestoreListener();
+                    } else {
+                        userId = null;
+                        showError('Authentication failed. Please refresh the page.');
+                    }
+                });
+
+            } catch (e) {
+                console.error("Error initializing Firebase:", e);
+                showError("Failed to connect to the database. Please try again.");
+            }
+        };
+
+        // Render subjects to the DOM
+        const renderSubjects = (subjects) => {
+            if (subjects.length === 0) {
+                subjectsContainer.innerHTML = `
+                    <div class="text-center text-gray-500 p-8 rounded-xl bg-white shadow-xl">
+                        <p>No subjects added yet. Add a new subject to start tracking!</p>
+                    </div>
+                `;
+                return;
+            }
+
+            subjectsContainer.innerHTML = subjects.map(subject => {
+                const { id, name, attended, total } = subject;
+                const percentage = total > 0 ? (attended / total * 100) : 0;
+                const isBelowThreshold = percentage < 75;
+
+                let recommendation = '';
+                if (total === 0) {
+                  recommendation = 'Add classes to start tracking.';
+                } else {
+                  const requiredAttended = Math.ceil(0.75 * total);
+                  if (attended >= requiredAttended) {
+                    const canMiss = Math.floor(attended / 0.75 - total);
+                    recommendation = `You can miss up to ${canMiss} more class${canMiss !== 1 ? 'es' : ''}.`;
+                  } else {
+                    const classesToAttend = requiredAttended - attended;
+                    recommendation = `You need to attend ${classesToAttend} more class${classesToAttend !== 1 ? 'es' : ''}.`;
+                  }
+                }
+
+                const percentageColor = isBelowThreshold ? '#ef4444' : '#22c55e';
+
+                return `
+                    <div class="flex flex-col md:flex-row items-center justify-between p-4 bg-white rounded-xl shadow-sm mb-4">
+                        <div class="flex-1 text-center md:text-left mb-4 md:mb-0">
+                            <h3 class="text-xl font-bold text-gray-800">${name}</h3>
+                        </div>
+                        <div class="flex items-center space-x-4 mb-4 md:mb-0">
+                            <div class="text-center">
+                                <p class="text-sm text-gray-500">Attended</p>
+                                <div class="flex items-center" data-id="${id}" data-action="attended">
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="-1">-</button>
+                                    <span class="mx-2 text-2xl font-semibold text-gray-800">${attended}</span>
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="1">+</button>
+                                </div>
+                            </div>
+                            <div class="text-center">
+                                <p class="text-sm text-gray-500">Total</p>
+                                <div class="flex items-center" data-id="${id}" data-action="total">
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="-1">-</button>
+                                    <span class="mx-2 text-2xl font-semibold text-gray-800">${total}</span>
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="1">+</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="text-center md:text-right flex-1 md:ml-8 mt-4 md:mt-0">
+                            <p class="text-lg font-semibold" style="color: ${percentageColor};">
+                                ${percentage.toFixed(2)}%
+                            </p>
+                            <p class="text-sm text-gray-600 mt-1">${recommendation}</p>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // Add event listeners for the +/- buttons
+            subjectsContainer.querySelectorAll('button').forEach(button => {
+                button.addEventListener('click', async (e) => {
+                    const parentDiv = e.target.closest('div[data-id]');
+                    const id = parentDiv.dataset.id;
+                    const action = parentDiv.dataset.action;
+                    const change = parseInt(e.target.dataset.change);
+
+                    const subject = subjects.find(s => s.id === id);
+                    if (!subject) return;
+
+                    const updatedFields = {};
+                    if (action === 'attended') {
+                        updatedFields.attended = Math.max(0, subject.attended + change);
+                        if (change === 1) {
+                            updatedFields.total = Math.max(updatedFields.attended, subject.total);
+                        }
+                    } else if (action === 'total') {
+                        updatedFields.total = Math.max(0, subject.total + change, subject.attended);
+                    }
+
+                    await updateSubject(id, updatedFields);
+                });
+            });
+        };
+
+        // Firestore listener
+        const setupFirestoreListener = () => {
+            if (!db || !userId) {
+                return;
+            }
+
+            showLoading();
+            const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+            const q = query(collection(db, collectionPath));
+
+            onSnapshot(q, (snapshot) => {
+                hideError();
+                const subjectsData = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data(),
+                }));
+                renderSubjects(subjectsData);
+            }, (err) => {
+                console.error("Failed to fetch subjects:", err);
+                showError("Failed to load attendance data.");
+            });
+        };
+
+        // Add a new subject
+        const handleAddSubject = async (e) => {
+            e.preventDefault();
+            const newSubjectName = newSubjectNameInput.value.trim();
+            if (!newSubjectName || !db || !userId) return;
+
+            try {
+                const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+                await addDoc(collection(db, collectionPath), {
+                    name: newSubjectName,
+                    attended: 0,
+                    total: 0,
+                });
+                newSubjectNameInput.value = '';
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showError("Error adding new subject.");
+            }
+        };
+
+        // Update a subject's attendance data
+        const updateSubject = async (id, updatedFields) => {
+            if (!db || !userId) return;
+            try {
+                const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+                const subjectDocRef = doc(db, collectionPath, id);
+                await updateDoc(subjectDocRef, updatedFields);
+            } catch (e) {
+                console.error("Error updating document: ", e);
+            }
+        };
+
+        // Event listener for the form
+        addSubjectForm.addEventListener('submit', handleAddSubject);
+
+        // Initialize the app
+        initFirebase();
+    </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Attendance Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-4 sm:p-8">
+    <div class="max-w-4xl mx-auto">
+        <header class="text-center mb-10">
+            <h1 class="text-4xl sm:text-5xl font-extrabold text-gray-900 leading-tight">
+                Attendance Tracker
+            </h1>
+            <p class="mt-4 text-lg sm:text-xl text-gray-600">
+                Keep your attendance above 75%!
+            </p>
+            <p id="userIdDisplay" class="mt-2 text-sm text-gray-400"></p>
+        </header>
+
+        <div id="errorContainer" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-xl mb-4" role="alert">
+            <span id="errorMessage" class="block sm:inline"></span>
+        </div>
+
+        <!-- Form to add new subject -->
+        <div class="bg-white p-6 rounded-3xl shadow-xl mb-8">
+            <form id="addSubjectForm" class="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
+                <input
+                    type="text"
+                    id="newSubjectName"
+                    placeholder="Enter new subject name..."
+                    class="flex-1 p-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200"
+                />
+                <button
+                    type="submit"
+                    class="bg-blue-600 text-white font-bold py-3 px-6 rounded-xl hover:bg-blue-700 transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+                >
+                    Add Subject
+                </button>
+            </form>
+        </div>
+
+        <!-- List of subjects -->
+        <div id="subjectsContainer" class="space-y-4">
+            <!-- Subjects will be rendered here by JavaScript -->
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, onSnapshot, doc, addDoc, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables for Firebase setup
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = null;
+
+        const subjectsContainer = document.getElementById('subjectsContainer');
+        const addSubjectForm = document.getElementById('addSubjectForm');
+        const newSubjectNameInput = document.getElementById('newSubjectName');
+        const userIdDisplay = document.getElementById('userIdDisplay');
+        const errorContainer = document.getElementById('errorContainer');
+        const errorMessage = document.getElementById('errorMessage');
+        
+        const showLoading = () => {
+          subjectsContainer.innerHTML = `
+            <div class="flex items-center justify-center p-8 bg-white rounded-xl shadow-xl">
+              <svg class="animate-spin h-10 w-10 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            </div>
+          `;
+        };
+
+        const showError = (message) => {
+          errorMessage.textContent = message;
+          errorContainer.classList.remove('hidden');
+        };
+
+        const hideError = () => {
+          errorContainer.classList.add('hidden');
+        };
+
+        // Initialize Firebase and Auth
+        const initFirebase = async () => {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        userIdDisplay.textContent = `User ID: ${userId}`;
+                        setupFirestoreListener();
+                    } else {
+                        userId = null;
+                        showError('Authentication failed. Please refresh the page.');
+                    }
+                });
+
+            } catch (e) {
+                console.error("Error initializing Firebase:", e);
+                showError("Failed to connect to the database. Please try again.");
+            }
+        };
+
+        // Render subjects to the DOM
+        const renderSubjects = (subjects) => {
+            if (subjects.length === 0) {
+                subjectsContainer.innerHTML = `
+                    <div class="text-center text-gray-500 p-8 rounded-xl bg-white shadow-xl">
+                        <p>No subjects added yet. Add a new subject to start tracking!</p>
+                    </div>
+                `;
+                return;
+            }
+
+            subjectsContainer.innerHTML = subjects.map(subject => {
+                const { id, name, attended, total } = subject;
+                const percentage = total > 0 ? (attended / total * 100) : 0;
+                const isBelowThreshold = percentage < 75;
+
+                let recommendation = '';
+                if (total === 0) {
+                  recommendation = 'Add classes to start tracking.';
+                } else {
+                  const requiredAttended = Math.ceil(0.75 * total);
+                  if (attended >= requiredAttended) {
+                    const canMiss = Math.floor(attended / 0.75 - total);
+                    recommendation = `You can miss up to ${canMiss} more class${canMiss !== 1 ? 'es' : ''}.`;
+                  } else {
+                    const classesToAttend = requiredAttended - attended;
+                    recommendation = `You need to attend ${classesToAttend} more class${classesToAttend !== 1 ? 'es' : ''}.`;
+                  }
+                }
+
+                const percentageColor = isBelowThreshold ? '#ef4444' : '#22c55e';
+
+                return `
+                    <div class="flex flex-col md:flex-row items-center justify-between p-4 bg-white rounded-xl shadow-sm mb-4">
+                        <div class="flex-1 text-center md:text-left mb-4 md:mb-0">
+                            <h3 class="text-xl font-bold text-gray-800">${name}</h3>
+                        </div>
+                        <div class="flex items-center space-x-4 mb-4 md:mb-0">
+                            <div class="text-center">
+                                <p class="text-sm text-gray-500">Attended</p>
+                                <div class="flex items-center" data-id="${id}" data-action="attended">
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="-1">-</button>
+                                    <span class="mx-2 text-2xl font-semibold text-gray-800">${attended}</span>
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="1">+</button>
+                                </div>
+                            </div>
+                            <div class="text-center">
+                                <p class="text-sm text-gray-500">Total</p>
+                                <div class="flex items-center" data-id="${id}" data-action="total">
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="-1">-</button>
+                                    <span class="mx-2 text-2xl font-semibold text-gray-800">${total}</span>
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="1">+</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="text-center md:text-right flex-1 md:ml-8 mt-4 md:mt-0">
+                            <p class="text-lg font-semibold" style="color: ${percentageColor};">
+                                ${percentage.toFixed(2)}%
+                            </p>
+                            <p class="text-sm text-gray-600 mt-1">${recommendation}</p>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // Add event listeners for the +/- buttons
+            subjectsContainer.querySelectorAll('button').forEach(button => {
+                button.addEventListener('click', async (e) => {
+                    const parentDiv = e.target.closest('div[data-id]');
+                    const id = parentDiv.dataset.id;
+                    const action = parentDiv.dataset.action;
+                    const change = parseInt(e.target.dataset.change);
+
+                    const subject = subjects.find(s => s.id === id);
+                    if (!subject) return;
+
+                    const updatedFields = {};
+                    if (action === 'attended') {
+                        updatedFields.attended = Math.max(0, subject.attended + change);
+                        if (change === 1) {
+                            updatedFields.total = Math.max(updatedFields.attended, subject.total);
+                        }
+                    } else if (action === 'total') {
+                        updatedFields.total = Math.max(0, subject.total + change, subject.attended);
+                    }
+
+                    await updateSubject(id, updatedFields);
+                });
+            });
+        };
+
+        // Firestore listener
+        const setupFirestoreListener = () => {
+            if (!db || !userId) {
+                return;
+            }
+
+            showLoading();
+            const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+            const q = query(collection(db, collectionPath));
+
+            onSnapshot(q, (snapshot) => {
+                hideError();
+                const subjectsData = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data(),
+                }));
+                renderSubjects(subjectsData);
+            }, (err) => {
+                console.error("Failed to fetch subjects:", err);
+                showError("Failed to load attendance data.");
+            });
+        };
+
+        // Add a new subject
+        const handleAddSubject = async (e) => {
+            e.preventDefault();
+            const newSubjectName = newSubjectNameInput.value.trim();
+            if (!newSubjectName || !db || !userId) return;
+
+            try {
+                const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+                await addDoc(collection(db, collectionPath), {
+                    name: newSubjectName,
+                    attended: 0,
+                    total: 0,
+                });
+                newSubjectNameInput.value = '';
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showError("Error adding new subject.");
+            }
+        };
+
+        // Update a subject's attendance data
+        const updateSubject = async (id, updatedFields) => {
+            if (!db || !userId) return;
+            try {
+                const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+                const subjectDocRef = doc(db, collectionPath, id);
+                await updateDoc(subjectDocRef, updatedFields);
+            } catch (e) {
+                console.error("Error updating document: ", e);
+            }
+        };
+
+        // Event listener for the form
+        addSubjectForm.addEventListener('submit', handleAddSubject);
+
+        // Initialize the app
+        initFirebase();
+    </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Attendance Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-4 sm:p-8">
+    <div class="max-w-4xl mx-auto">
+        <header class="text-center mb-10">
+            <h1 class="text-4xl sm:text-5xl font-extrabold text-gray-900 leading-tight">
+                Attendance Tracker
+            </h1>
+            <p class="mt-4 text-lg sm:text-xl text-gray-600">
+                Keep your attendance above 75%!
+            </p>
+            <p id="userIdDisplay" class="mt-2 text-sm text-gray-400"></p>
+        </header>
+
+        <div id="errorContainer" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-xl mb-4" role="alert">
+            <span id="errorMessage" class="block sm:inline"></span>
+        </div>
+
+        <!-- Form to add new subject -->
+        <div class="bg-white p-6 rounded-3xl shadow-xl mb-8">
+            <form id="addSubjectForm" class="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
+                <input
+                    type="text"
+                    id="newSubjectName"
+                    placeholder="Enter new subject name..."
+                    class="flex-1 p-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200"
+                />
+                <button
+                    type="submit"
+                    class="bg-blue-600 text-white font-bold py-3 px-6 rounded-xl hover:bg-blue-700 transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+                >
+                    Add Subject
+                </button>
+            </form>
+        </div>
+
+        <!-- List of subjects -->
+        <div id="subjectsContainer" class="space-y-4">
+            <!-- Subjects will be rendered here by JavaScript -->
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, onSnapshot, doc, addDoc, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables for Firebase setup
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = null;
+
+        const subjectsContainer = document.getElementById('subjectsContainer');
+        const addSubjectForm = document.getElementById('addSubjectForm');
+        const newSubjectNameInput = document.getElementById('newSubjectName');
+        const userIdDisplay = document.getElementById('userIdDisplay');
+        const errorContainer = document.getElementById('errorContainer');
+        const errorMessage = document.getElementById('errorMessage');
+        
+        const showLoading = () => {
+          subjectsContainer.innerHTML = `
+            <div class="flex items-center justify-center p-8 bg-white rounded-xl shadow-xl">
+              <svg class="animate-spin h-10 w-10 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            </div>
+          `;
+        };
+
+        const showError = (message) => {
+          errorMessage.textContent = message;
+          errorContainer.classList.remove('hidden');
+        };
+
+        const hideError = () => {
+          errorContainer.classList.add('hidden');
+        };
+
+        // Initialize Firebase and Auth
+        const initFirebase = async () => {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        userIdDisplay.textContent = `User ID: ${userId}`;
+                        setupFirestoreListener();
+                    } else {
+                        userId = null;
+                        showError('Authentication failed. Please refresh the page.');
+                    }
+                });
+
+            } catch (e) {
+                console.error("Error initializing Firebase:", e);
+                showError("Failed to connect to the database. Please try again.");
+            }
+        };
+
+        // Render subjects to the DOM
+        const renderSubjects = (subjects) => {
+            if (subjects.length === 0) {
+                subjectsContainer.innerHTML = `
+                    <div class="text-center text-gray-500 p-8 rounded-xl bg-white shadow-xl">
+                        <p>No subjects added yet. Add a new subject to start tracking!</p>
+                    </div>
+                `;
+                return;
+            }
+
+            subjectsContainer.innerHTML = subjects.map(subject => {
+                const { id, name, attended, total } = subject;
+                const percentage = total > 0 ? (attended / total * 100) : 0;
+                const isBelowThreshold = percentage < 75;
+
+                let recommendation = '';
+                if (total === 0) {
+                  recommendation = 'Add classes to start tracking.';
+                } else {
+                  const requiredAttended = Math.ceil(0.75 * total);
+                  if (attended >= requiredAttended) {
+                    const canMiss = Math.floor(attended / 0.75 - total);
+                    recommendation = `You can miss up to ${canMiss} more class${canMiss !== 1 ? 'es' : ''}.`;
+                  } else {
+                    const classesToAttend = requiredAttended - attended;
+                    recommendation = `You need to attend ${classesToAttend} more class${classesToAttend !== 1 ? 'es' : ''}.`;
+                  }
+                }
+
+                const percentageColor = isBelowThreshold ? '#ef4444' : '#22c55e';
+
+                return `
+                    <div class="flex flex-col md:flex-row items-center justify-between p-4 bg-white rounded-xl shadow-sm mb-4">
+                        <div class="flex-1 text-center md:text-left mb-4 md:mb-0">
+                            <h3 class="text-xl font-bold text-gray-800">${name}</h3>
+                        </div>
+                        <div class="flex items-center space-x-4 mb-4 md:mb-0">
+                            <div class="text-center">
+                                <p class="text-sm text-gray-500">Attended</p>
+                                <div class="flex items-center" data-id="${id}" data-action="attended">
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="-1">-</button>
+                                    <span class="mx-2 text-2xl font-semibold text-gray-800">${attended}</span>
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="1">+</button>
+                                </div>
+                            </div>
+                            <div class="text-center">
+                                <p class="text-sm text-gray-500">Total</p>
+                                <div class="flex items-center" data-id="${id}" data-action="total">
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="-1">-</button>
+                                    <span class="mx-2 text-2xl font-semibold text-gray-800">${total}</span>
+                                    <button class="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold" data-change="1">+</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="text-center md:text-right flex-1 md:ml-8 mt-4 md:mt-0">
+                            <p class="text-lg font-semibold" style="color: ${percentageColor};">
+                                ${percentage.toFixed(2)}%
+                            </p>
+                            <p class="text-sm text-gray-600 mt-1">${recommendation}</p>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // Add event listeners for the +/- buttons
+            subjectsContainer.querySelectorAll('button').forEach(button => {
+                button.addEventListener('click', async (e) => {
+                    const parentDiv = e.target.closest('div[data-id]');
+                    const id = parentDiv.dataset.id;
+                    const action = parentDiv.dataset.action;
+                    const change = parseInt(e.target.dataset.change);
+
+                    const subject = subjects.find(s => s.id === id);
+                    if (!subject) return;
+
+                    const updatedFields = {};
+                    if (action === 'attended') {
+                        updatedFields.attended = Math.max(0, subject.attended + change);
+                        if (change === 1) {
+                            updatedFields.total = Math.max(updatedFields.attended, subject.total);
+                        }
+                    } else if (action === 'total') {
+                        updatedFields.total = Math.max(0, subject.total + change, subject.attended);
+                    }
+
+                    await updateSubject(id, updatedFields);
+                });
+            });
+        };
+
+        // Firestore listener
+        const setupFirestoreListener = () => {
+            if (!db || !userId) {
+                return;
+            }
+
+            showLoading();
+            const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+            const q = query(collection(db, collectionPath));
+
+            onSnapshot(q, (snapshot) => {
+                hideError();
+                const subjectsData = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data(),
+                }));
+                renderSubjects(subjectsData);
+            }, (err) => {
+                console.error("Failed to fetch subjects:", err);
+                showError("Failed to load attendance data.");
+            });
+        };
+
+        // Add a new subject
+        const handleAddSubject = async (e) => {
+            e.preventDefault();
+            const newSubjectName = newSubjectNameInput.value.trim();
+            if (!newSubjectName || !db || !userId) return;
+
+            try {
+                const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+                await addDoc(collection(db, collectionPath), {
+                    name: newSubjectName,
+                    attended: 0,
+                    total: 0,
+                });
+                newSubjectNameInput.value = '';
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showError("Error adding new subject.");
+            }
+        };
+
+        // Update a subject's attendance data
+        const updateSubject = async (id, updatedFields) => {
+            if (!db || !userId) return;
+            try {
+                const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+                const subjectDocRef = doc(db, collectionPath, id);
+                await updateDoc(subjectDocRef, updatedFields);
+            } catch (e) {
+                console.error("Error updating document: ", e);
+            }
+        };
+
+        // Event listener for the form
+        addSubjectForm.addEventListener('submit', handleAddSubject);
+
+        // Initialize the app
+        initFirebase();
+    </script>
+</body>
+</html>
