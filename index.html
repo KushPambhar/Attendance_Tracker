@@ -1,0 +1,251 @@
+import { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, query, addDoc, updateDoc, deleteDoc } from 'firebase/firestore';
+
+// Main App component
+export default function App() {
+  const [subjects, setSubjects] = useState([]);
+  const [newSubjectName, setNewSubjectName] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+
+  // Constants for Firebase setup
+  const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+  const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+  const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+  // Initialize Firebase and set up authentication listener
+  useEffect(() => {
+    async function initFirebase() {
+      try {
+        const app = initializeApp(firebaseConfig);
+        const firestoreDb = getFirestore(app);
+        const firebaseAuth = getAuth(app);
+
+        setDb(firestoreDb);
+        setAuth(firebaseAuth);
+
+        // Sign in with the provided token or anonymously
+        if (initialAuthToken) {
+          await signInWithCustomToken(firebaseAuth, initialAuthToken);
+        } else {
+          await signInAnonymously(firebaseAuth);
+        }
+
+        // Listen for auth state changes to get the user ID
+        onAuthStateChanged(firebaseAuth, (user) => {
+          if (user) {
+            setUserId(user.uid);
+          } else {
+            setUserId(null);
+            setLoading(false);
+          }
+        });
+
+      } catch (e) {
+        console.error("Error initializing Firebase:", e);
+        setError("Failed to connect to the database. Please try again.");
+        setLoading(false);
+      }
+    }
+    initFirebase();
+  }, [firebaseConfig, initialAuthToken]);
+
+  // Set up Firestore listener for attendance data
+  useEffect(() => {
+    if (!db || !userId) {
+      return;
+    }
+
+    setLoading(true);
+    // Define the collection path for the user's private data
+    const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+    const q = query(collection(db, collectionPath));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const subjectsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+      setSubjects(subjectsData);
+      setLoading(false);
+    }, (err) => {
+      console.error("Failed to fetch subjects:", err);
+      setError("Failed to load attendance data.");
+      setLoading(false);
+    });
+
+    // Cleanup the listener on component unmount
+    return () => unsubscribe();
+  }, [db, userId, appId]);
+
+  // Handle adding a new subject
+  const handleAddSubject = async (e) => {
+    e.preventDefault();
+    if (!newSubjectName || !db || !userId) return;
+
+    try {
+      const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+      await addDoc(collection(db, collectionPath), {
+        name: newSubjectName,
+        attended: 0,
+        total: 0,
+      });
+      setNewSubjectName('');
+    } catch (e) {
+      console.error("Error adding document: ", e);
+      // In a real app, you would show a user-friendly error message
+    }
+  };
+
+  // Update a subject's attendance data
+  const updateSubject = async (id, updatedFields) => {
+    if (!db || !userId) return;
+    try {
+      const collectionPath = `/artifacts/${appId}/users/${userId}/attendance-tracker`;
+      const subjectDocRef = doc(db, collectionPath, id);
+      await updateDoc(subjectDocRef, updatedFields);
+    } catch (e) {
+      console.error("Error updating document: ", e);
+    }
+  };
+
+  // Component for a single subject row
+  const SubjectRow = ({ subject }) => {
+    const { name, attended, total, id } = subject;
+    const percentage = total > 0 ? (attended / total * 100) : 0;
+    const isBelowThreshold = percentage < 75;
+
+    // Logic to calculate classes needed/can be missed
+    let recommendation = '';
+    if (total === 0) {
+      recommendation = 'Add classes to start tracking.';
+    } else {
+      const requiredAttended = Math.ceil(0.75 * total);
+      if (attended >= requiredAttended) {
+        const canMiss = Math.floor(attended / 0.75 - total);
+        recommendation = `You can miss up to ${canMiss} more class${canMiss !== 1 ? 'es' : ''}.`;
+      } else {
+        const classesToAttend = requiredAttended - attended;
+        recommendation = `You need to attend ${classesToAttend} more class${classesToAttend !== 1 ? 'es' : ''}.`;
+      }
+    }
+
+    return (
+      <div className="flex flex-col md:flex-row items-center justify-between p-4 bg-white rounded-xl shadow-sm mb-4">
+        <div className="flex-1 text-center md:text-left mb-4 md:mb-0">
+          <h3 className="text-xl font-bold text-gray-800">{name}</h3>
+        </div>
+        <div className="flex items-center space-x-4 mb-4 md:mb-0">
+          <div className="text-center">
+            <p className="text-sm text-gray-500">Attended</p>
+            <div className="flex items-center">
+              <button
+                onClick={() => updateSubject(id, { attended: Math.max(0, attended - 1) })}
+                className="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold"
+              >-</button>
+              <span className="mx-2 text-2xl font-semibold text-gray-800">{attended}</span>
+              <button
+                onClick={() => updateSubject(id, { attended: attended + 1, total: Math.max(attended + 1, total) })}
+                className="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold"
+              >+</button>
+            </div>
+          </div>
+          <div className="text-center">
+            <p className="text-sm text-gray-500">Total</p>
+            <div className="flex items-center">
+              <button
+                onClick={() => updateSubject(id, { total: Math.max(0, total - 1, attended) })}
+                className="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold"
+              >-</button>
+              <span className="mx-2 text-2xl font-semibold text-gray-800">{total}</span>
+              <button
+                onClick={() => updateSubject(id, { total: total + 1 })}
+                className="w-8 h-8 flex items-center justify-center bg-gray-200 hover:bg-gray-300 rounded-full text-lg font-bold"
+              >+</button>
+            </div>
+          </div>
+        </div>
+        <div className="text-center md:text-right flex-1 md:ml-8 mt-4 md:mt-0">
+          <p className="text-lg font-semibold" style={{ color: isBelowThreshold ? '#ef4444' : '#22c55e' }}>
+            {percentage.toFixed(2)}%
+          </p>
+          <p className="text-sm text-gray-600 mt-1">{recommendation}</p>
+        </div>
+      </div>
+    );
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-gray-100">
+        <svg className="animate-spin h-10 w-10 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100 p-4 sm:p-8">
+      <div className="max-w-4xl mx-auto">
+        <header className="text-center mb-10">
+          <h1 className="text-4xl sm:text-5xl font-extrabold text-gray-900 leading-tight">
+            Attendance Tracker
+          </h1>
+          <p className="mt-4 text-lg sm:text-xl text-gray-600">
+            Keep your attendance above 75%!
+          </p>
+          {userId && (
+            <p className="mt-2 text-sm text-gray-400">
+              User ID: {userId}
+            </p>
+          )}
+        </header>
+
+        {error && (
+          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-xl mb-4" role="alert">
+            <span className="block sm:inline">{error}</span>
+          </div>
+        )}
+
+        {/* Form to add new subject */}
+        <div className="bg-white p-6 rounded-3xl shadow-xl mb-8">
+          <form onSubmit={handleAddSubject} className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
+            <input
+              type="text"
+              value={newSubjectName}
+              onChange={(e) => setNewSubjectName(e.target.value)}
+              placeholder="Enter new subject name..."
+              className="flex-1 p-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200"
+            />
+            <button
+              type="submit"
+              className="bg-blue-600 text-white font-bold py-3 px-6 rounded-xl hover:bg-blue-700 transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+            >
+              Add Subject
+            </button>
+          </form>
+        </div>
+
+        {/* List of subjects */}
+        <div className="space-y-4">
+          {subjects.length > 0 ? (
+            subjects.map(subject => (
+              <SubjectRow key={subject.id} subject={subject} />
+            ))
+          ) : (
+            <div className="text-center text-gray-500 p-8 rounded-xl bg-white shadow-xl">
+              <p>No subjects added yet. Add a new subject to start tracking!</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
